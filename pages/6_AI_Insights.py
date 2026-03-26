@@ -25,6 +25,15 @@ from analysis.ai_insights import cluster_epochs, generate_summary
 # ── Clustering ─────────────────────────────────────────────────────────────
 st.header("Unsupervised Pattern Discovery")
 
+raw_filtered = st.session_state.get("raw_filtered")
+
+if raw_filtered is not None:
+    raw = raw_filtered
+    st.success("✨ Currently using **post-filtered** signals (from Preprocessing page).")
+else:
+    raw = rec.build_mne_raw()
+    st.warning("⚠️ Currently using **raw** EEG signals. Insights may be skewed by artifacts.")
+
 features = st.session_state.get("anomaly_features")
 if features is None:
     st.info(
@@ -33,7 +42,6 @@ if features is None:
     )
     if st.button("Extract Features"):
         from utils.signal_processing import make_fixed_epochs, extract_epoch_features
-        raw = st.session_state.get("raw_filtered", rec.build_mne_raw())
         with st.spinner("Extracting features..."):
             epochs = make_fixed_epochs(raw, duration=2.0)
             features = extract_epoch_features(epochs)
@@ -103,6 +111,41 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── VR video context card (shown if events exist) ─────────────────────────
+_video_events = st.session_state.get("video_events", [])
+if _video_events:
+    from analysis.video_analysis import EVENT_COLORS, EVENT_ICONS
+    _type_counts: dict[str, int] = {}
+    for _ev in _video_events:
+        _type_counts[_ev.event_type] = _type_counts.get(_ev.event_type, 0) + 1
+    _major = [ev for ev in _video_events if ev.severity == "major"]
+    _badges = " ".join(
+        f'<span style="background:{EVENT_COLORS.get(t,"#8b949e")}22; '
+        f'color:{EVENT_COLORS.get(t,"#8b949e")}; border:1px solid {EVENT_COLORS.get(t,"#8b949e")}; '
+        f'border-radius:10px; padding:2px 9px; font-size:0.82rem; margin-right:4px;">'
+        f'{EVENT_ICONS.get(t,"")} {t}: <strong>{c}</strong></span>'
+        for t, c in sorted(_type_counts.items())
+    )
+    st.markdown(
+        f"""
+        <div style="background:#161b22; border:1px solid #238636; border-left:4px solid #3fb950;
+                    border-radius:10px; padding:12px 16px; margin-bottom:1.2rem;">
+            <strong style="color:#3fb950;">🎬 VR Screen Recording Loaded</strong>
+            &nbsp;&mdash;&nbsp;
+            <span style="color:#c9d1d9; font-size:0.9rem;">{len(_video_events)} behavioural events
+            ({len(_major)} major) will be included in the report.</span><br>
+            <div style="margin-top:7px;">{_badges}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.info(
+        "💡 No VR screen recording analysed yet. "
+        "Run video analysis on the Anomaly Detection page to enrich the AI report "
+        "with behavioural event context."
+    )
+
 col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
     provider = st.selectbox(
@@ -161,7 +204,9 @@ if st.button("Generate Analysis Report", type="primary"):
                 compute_trigger_band_shift,
             )
             epoch_dur = st.session_state.get("anomaly_epoch_dur", 2.0)
-            t_time = trigger_info["trigger_time_s"]
+            # Apply the same video/VR time offset so trigger time aligns with EEG
+            _ai_offset = float(st.session_state.get("video_time_offset_s", 0.0))
+            t_time = trigger_info["trigger_time_s"] + _ai_offset
             trigger_stats = {}
 
             try:
@@ -191,6 +236,7 @@ if st.button("Generate Analysis Report", type="primary"):
                     pass
 
         # 2. Call Generator
+        video_events_for_report = st.session_state.get("video_events") or None
         if provider == "Template (Offline)":
             summary = generate_summary(
                 rec_metadata=rec.metadata,
@@ -200,6 +246,7 @@ if st.button("Generate Analysis Report", type="primary"):
                 survey_responses=survey_responses,
                 trigger_info=trigger_info,
                 trigger_stats=trigger_stats,
+                video_events=video_events_for_report,
             )
         else:
             from analysis.ai_insights import generate_llm_summary
@@ -215,6 +262,7 @@ if st.button("Generate Analysis Report", type="primary"):
                 survey_responses=survey_responses,
                 trigger_info=trigger_info,
                 trigger_stats=trigger_stats,
+                video_events=video_events_for_report,
             )
 
         st.session_state["ai_summary_text"] = summary

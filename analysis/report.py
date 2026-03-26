@@ -112,6 +112,7 @@ def generate_html_report(
     plotly_divs: list[tuple[str, str]] | None = None,
     trigger_info: dict | None = None,
     trigger_stats: dict | None = None,
+    video_analysis: dict | None = None,
 ) -> str:
     """Generate a comprehensive HTML report with embedded interactive Plotly charts."""
     sections = []
@@ -252,6 +253,107 @@ def generate_html_report(
                 f"<li>{e}</li>" for e in trigger_info["explanations"]
             ) + "</ul>"
             sections.append(f"<h3>Trigger Notes</h3>{notes_html}")
+
+    # ── Video Analysis ─────────────────────────────────────────────────
+    if video_analysis is not None:
+        from analysis.video_analysis import EVENT_COLORS, EVENT_ICONS
+
+        sections.append("<h2>VR Screen Recording Analysis</h2>")
+
+        # Scene summary
+        scene_summary = video_analysis.get("scene_summary", "")
+        if scene_summary:
+            html_scene = scene_summary.replace("\n", "<br>")
+            html_scene = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', html_scene)
+            html_scene = re.sub(r'\*(.+?)\*', r'<em>\1</em>', html_scene)
+            sections.append(
+                f'<div class="summary">{html_scene}</div>'
+            )
+
+        # Event summary metrics
+        events = video_analysis.get("events", [])
+        if events:
+            type_counts: dict[str, int] = {}
+            severity_counts: dict[str, int] = {"minor": 0, "moderate": 0, "major": 0}
+            for ev in events:
+                etype = ev.event_type if hasattr(ev, "event_type") else ev.get("event_type", "")
+                sev = ev.severity if hasattr(ev, "severity") else ev.get("severity", "minor")
+                type_counts[etype] = type_counts.get(etype, 0) + 1
+                severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+            ev_metrics = '<div class="metrics-grid">'
+            ev_metrics += (
+                f'<div class="metric"><div class="metric-value">{len(events)}</div>'
+                f'<div class="metric-label">Total Events</div></div>'
+            )
+            for etype, count in sorted(type_counts.items()):
+                color = EVENT_COLORS.get(etype, "#8b949e")
+                ev_metrics += (
+                    f'<div class="metric" style="border-color: {color};">'
+                    f'<div class="metric-value" style="color: {color};">{count}</div>'
+                    f'<div class="metric-label">{EVENT_ICONS.get(etype, "")} {etype}</div></div>'
+                )
+            ev_metrics += '</div>'
+            sections.append(ev_metrics)
+
+            # Event table
+            ev_rows = []
+            for ev in events:
+                ts = ev.timestamp_s if hasattr(ev, "timestamp_s") else ev.get("timestamp_s", 0)
+                etype = ev.event_type if hasattr(ev, "event_type") else ev.get("event_type", "")
+                desc = ev.description if hasattr(ev, "description") else ev.get("description", "")
+                sev = ev.severity if hasattr(ev, "severity") else ev.get("severity", "")
+                icon = EVENT_ICONS.get(etype, "")
+                ev_rows.append(f"<tr><td>{ts:.1f}s</td><td>{icon} {etype}</td>"
+                               f"<td>{sev}</td><td>{desc}</td></tr>")
+
+            ev_table = (
+                "<table><tr><th>Time</th><th>Type</th><th>Severity</th>"
+                "<th>Description</th></tr>" + "".join(ev_rows) + "</table>"
+            )
+            sections.append("<h3>Detected Behavioural Events</h3>" + ev_table)
+
+        # Coincidence stats
+        coincidence = video_analysis.get("coincidence")
+        if coincidence is not None:
+            rate = coincidence.get("overall_rate", 0)
+            expected = coincidence.get("expected_rate", 0)
+            pval = coincidence.get("p_value", 1.0)
+            obs = coincidence.get("observed_count", 0)
+
+            coin_metrics = (
+                '<div class="metrics-grid">'
+                f'<div class="metric"><div class="metric-value">{obs}/{len(events)}</div>'
+                f'<div class="metric-label">Coincident Events</div></div>'
+                f'<div class="metric"><div class="metric-value">{rate:.1%}</div>'
+                f'<div class="metric-label">Coincidence Rate</div></div>'
+                f'<div class="metric"><div class="metric-value">{expected:.1%}</div>'
+                f'<div class="metric-label">Expected Rate</div></div>'
+                f'<div class="metric"><div class="metric-value">{pval:.4f}</div>'
+                f'<div class="metric-label">p-value (perm)</div></div>'
+                '</div>'
+            )
+            sections.append(
+                "<h3>Video Event&ndash;EEG Anomaly Coincidence</h3>" + coin_metrics
+            )
+
+        # Event stats table
+        event_stats_df = video_analysis.get("event_stats_df")
+        if event_stats_df is not None and not event_stats_df.empty:
+            sections.append(
+                "<h3>Pre / Post Event Anomaly Comparison</h3>"
+                + event_stats_df.to_html(index=False)
+            )
+
+        # Video analysis plots
+        video_plots = video_analysis.get("plots", [])
+        for plot_title, plot_html in video_plots:
+            sections.append(
+                f'<div class="plot-container">'
+                f'<div class="plot-title">{plot_title}</div>'
+                f'{plot_html}'
+                f'</div>'
+            )
 
     content = "\n".join(sections)
     # Use replace() — NOT format() — so Plotly's embedded JSON {}/[] are preserved

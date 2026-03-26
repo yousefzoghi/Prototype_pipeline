@@ -24,7 +24,15 @@ if rec is None:
 
 from utils.signal_processing import FREQ_BANDS
 
-raw = st.session_state.get("raw_filtered", rec.build_mne_raw())
+# ── Data Selection ────────────────────────────────────────────────────────
+raw_filtered = st.session_state.get("raw_filtered")
+
+if raw_filtered is not None:
+    raw = raw_filtered
+    st.success("✨ Currently using **post-filtered** signals (from Preprocessing page).")
+else:
+    raw = rec.build_mne_raw()
+    st.warning("⚠️ Currently using **raw** EEG signals. Topomaps may be noisy without bandpass filtering.")
 
 # ── Montage Selection ──────────────────────────────────────────────────────
 st.header("Montage Configuration")

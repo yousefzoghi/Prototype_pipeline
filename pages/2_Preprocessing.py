@@ -79,6 +79,41 @@ if raw_filtered is not None:
                       xaxis2_title="Time (s)", margin=dict(l=60, r=20, t=40, b=40))
     st.plotly_chart(fig, use_container_width=True)
 
+    # ── PSD Comparison ───────────────────────────────────────────────────
+    with st.expander("📊 Power Spectral Density Comparison", expanded=True):
+        st.markdown("Verify that line noise (50/60 Hz) and DC offsets have been removed.")
+        
+        from utils.signal_processing import compute_psd
+        
+        psd_col1, psd_col2 = st.columns(2)
+        with psd_col1:
+            fmax_view = st.slider("Max frequency to view (Hz)", 10, 100, 60)
+        
+        with st.spinner("Computing PSD comparison..."):
+            # Compute PSD for original and filtered
+            # Use a slightly larger n_fft for better resolution in this view
+            psds_before, freqs_before = compute_psd(raw.copy().pick(ch_idx), fmin=0.5, fmax=fmax_view, n_fft=512)
+            psds_after, freqs_after = compute_psd(raw_filtered.copy().pick(ch_idx), fmin=0.5, fmax=fmax_view, n_fft=512)
+            
+            fig_psd = go.Figure()
+            fig_psd.add_trace(go.Scatter(
+                x=freqs_before, y=10 * np.log10(psds_before[0] + 1e-20),
+                mode="lines", name="Before (Raw)", line=dict(color="#ff6b6b", width=1.5)
+            ))
+            fig_psd.add_trace(go.Scatter(
+                x=freqs_after, y=10 * np.log10(psds_after[0] + 1e-20),
+                mode="lines", name="After (Filtered)", line=dict(color="#51cf66", width=2)
+            ))
+            
+            fig_psd.update_layout(
+                template="plotly_dark", height=400,
+                xaxis_title="Frequency (Hz)", yaxis_title="Power (dB)",
+                title=f"PSD Comparison — {ch_compare}",
+                margin=dict(l=60, r=20, t=40, b=60),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig_psd, use_container_width=True)
+
 # ── ICA ────────────────────────────────────────────────────────────────────
 st.header("ICA Artifact Rejection")
 st.markdown("Decompose the signal into independent components to identify and remove artifacts.")

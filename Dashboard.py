@@ -66,6 +66,17 @@ if recordings:
         unsafe_allow_html=True,
     )
     rec_name = st.sidebar.selectbox("Active recording", list(recordings.keys()), label_visibility="collapsed")
+    
+    # If the recording has changed, clear the processed data from session state
+    if st.session_state.get("active_rec_name") != rec_name:
+        st.session_state["active_rec_name"] = rec_name
+        if "raw_filtered" in st.session_state:
+            del st.session_state["raw_filtered"]
+        if "ica" in st.session_state:
+            del st.session_state["ica"]
+        if "ica_source" in st.session_state:
+            del st.session_state["ica_source"]
+            
     active_rec = recordings[rec_name]
     st.session_state["active_rec_name"] = rec_name
 

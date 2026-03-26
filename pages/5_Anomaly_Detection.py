@@ -66,6 +66,14 @@ from analysis.anomaly import (
     compute_trigger_locked_scores, pre_post_trigger_test,
     trigger_coincidence_test, compute_trigger_band_shift,
 )
+from analysis.video_analysis import (
+    analyze_video_with_gemini, parse_gemini_response,
+    clamp_events_to_duration,
+    compute_event_anomaly_coincidence, compute_event_locked_erp,
+    compute_event_anomaly_stats, add_video_event_overlays,
+    build_event_strip_trace, events_to_dataframe, get_mime_type,
+    EVENT_COLORS, EVENT_ICONS, SEVERITY_SIZE,
+)
 
 # ── Optional Trigger File Upload ───────────────────────────────────────────
 with st.expander("⚡ VR Experiment Trigger Events (optional)", expanded=False):
@@ -108,6 +116,21 @@ with st.expander("⚡ VR Experiment Trigger Events (optional)", expanded=False):
             t_min = int(t_s // 60)
             t_sec = t_s % 60
 
+            _cur_offset = float(st.session_state.get("video_time_offset_s", 0.0))
+            _eeg_note = ""
+            if _cur_offset != 0.0:
+                _eeg_t = t_s + _cur_offset
+                _eeg_min = int(_eeg_t // 60)
+                _eeg_sec = _eeg_t % 60
+                _eeg_note = (
+                    f'<br><span style="color:#8b949e; font-size:0.85rem;">'
+                    f'&#128280; Analysed at EEG position&nbsp;'
+                    f'<strong style="color:#ffa657;">{_eeg_min}:{_eeg_sec:04.1f}</strong>'
+                    f'&nbsp;&mdash;&nbsp;VR trigger time ({t_s:.1f} s)'
+                    f' shifted forward by sync offset'
+                    f' <strong style="color:#ffa657;">{_cur_offset:+.1f} s</strong>'
+                    f'</span>'
+                )
             st.markdown(
                 f'<div style="background: linear-gradient(135deg, #0d1f0d 0%, #1a2a1a 100%); '
                 f'border: 1px solid {color}; border-radius: 8px; padding: 12px 16px; '
@@ -116,7 +139,8 @@ with st.expander("⚡ VR Experiment Trigger Events (optional)", expanded=False):
                 f'<strong style="color: {color}; font-size: 1rem;"> '
                 f'{selected_participant}</strong> &nbsp;—&nbsp; '
                 f'<span style="color: #c9d1d9;">{grp} trigger at '
-                f'<strong>{t_min}:{t_sec:04.1f}</strong> ({t_s:.1f}s)</span></div>',
+                f'<strong>{t_min}:{t_sec:04.1f}</strong> ({t_s:.1f}s VR time)</span>'
+                f'{_eeg_note}</div>',
                 unsafe_allow_html=True,
             )
             if trigger_info["explanations"]:
@@ -138,7 +162,210 @@ with st.expander("⚡ VR Experiment Trigger Events (optional)", expanded=False):
             f"{trigger_info['trigger_time_s']:.1f}s)"
         )
 
-raw = st.session_state.get("raw_filtered", rec.build_mne_raw())
+# ── Optional VR Screen Recording Analysis ─────────────────────────────────
+with st.expander("🎥 VR Screen Recording Analysis (optional)", expanded=False):
+    st.markdown(
+        '<p style="color: #8b949e; font-size: 0.85rem; margin-bottom: 8px;">'
+        'Upload a <strong>VR screen recording</strong> to automatically extract '
+        'behavioural events (head movements, gaze shifts, sudden actions) using '
+        'Google Gemini Vision-Language Model. Events are overlaid on anomaly plots '
+        'and used for multi-modal EEG–behaviour correlation analysis.</p>',
+        unsafe_allow_html=True,
+    )
+
+    gemini_api_key = st.text_input(
+        "Gemini API Key",
+        type="password",
+        help="Your Google AI Studio API key for Gemini. Get one at https://aistudio.google.com/",
+        key="gemini_api_key_input",
+    )
+
+    vid_col1, vid_col2 = st.columns(2)
+    with vid_col1:
+        video_file = st.file_uploader(
+            "Upload Video",
+            type=["mp4", "avi", "mov", "webm", "mkv"],
+            key="video_upload",
+            help="VR screen recording file (up to 200 MB via upload).",
+        )
+    with vid_col2:
+        video_path = st.text_input(
+            "Or enter local file path",
+            help="Full path to a video file on disk (for larger files).",
+            key="video_path_input",
+        )
+
+    model_col, _ = st.columns([1, 1])
+    with model_col:
+        gemini_model = st.selectbox(
+            "Gemini Model",
+            options=["gemini-flash-latest", "gemini-flash-lite-latest"],
+            index=0,
+            help="Flash provides full analysis; Flash Lite is faster and lighter.",
+        )
+
+    custom_prompt = st.text_area(
+        "Additional context for the AI (optional)",
+        value="This is an indoor office/building evacuation scenario in VR. "
+              "The participant may encounter fire alarms, smoke, exit signs, "
+              "and emergency lighting.",
+        height=80,
+        help="Add experiment-specific context to improve event extraction quality.",
+    )
+
+    video_events = st.session_state.get("video_events")
+
+    if st.button("🔍 Analyse Video", type="secondary"):
+        if not gemini_api_key:
+            st.error("Please provide a Gemini API key.")
+        else:
+            # Resolve video bytes
+            video_bytes = None
+            video_filename = "video.mp4"
+            if video_file is not None:
+                video_bytes = video_file.getvalue()
+                video_filename = video_file.name
+            elif video_path.strip():
+                import os
+                p = video_path.strip()
+                if os.path.isfile(p):
+                    with open(p, "rb") as f:
+                        video_bytes = f.read()
+                    video_filename = os.path.basename(p)
+                else:
+                    st.error(f"File not found: {p}")
+
+            if video_bytes is not None:
+                mime = get_mime_type(video_filename)
+                with st.spinner("Sending video to Gemini for analysis (this may take 1-2 minutes)…"):
+                    try:
+                        result = analyze_video_with_gemini(
+                            video_bytes=video_bytes,
+                            api_key=gemini_api_key,
+                            model=gemini_model,
+                            custom_prompt=custom_prompt,
+                            mime_type=mime,
+                        )
+                        events = parse_gemini_response(result["events_text"])
+                        # Clamp timestamps to actual video duration
+                        vid_dur = result.get("video_duration_s")
+                        if vid_dur is not None:
+                            n_before = len(events)
+                            events = clamp_events_to_duration(events, vid_dur)
+                            n_dropped = n_before - len(events)
+                            if n_dropped > 0:
+                                st.warning(
+                                    f"Dropped **{n_dropped}** events with timestamps "
+                                    f"beyond video duration ({vid_dur:.1f}s)."
+                                )
+                        st.session_state["video_events"] = events
+                        st.session_state["video_raw_response"] = result["events_text"]
+                        st.session_state["video_scene_summary"] = result.get("scene_summary", "")
+                        st.session_state["video_duration_s"] = result.get("video_duration_s")
+                        video_events = events
+                        st.success(f"Extracted **{len(events)}** behavioural events from video.")
+                    except Exception as e:
+                        st.error(f"Gemini API error: {e}")
+            elif video_file is None and not video_path.strip():
+                st.warning("Please upload a video file or enter a file path.")
+
+    # Display extracted events if available
+    if video_events:
+        # Summary badges
+        type_counts = {}
+        for ev in video_events:
+            type_counts[ev.event_type] = type_counts.get(ev.event_type, 0) + 1
+
+        badge_html = ""
+        for etype, count in sorted(type_counts.items()):
+            color = EVENT_COLORS.get(etype, "#8b949e")
+            icon_e = EVENT_ICONS.get(etype, "📌")
+            badge_html += (
+                f'<span style="background: {color}22; color: {color}; '
+                f'border: 1px solid {color}; border-radius: 12px; '
+                f'padding: 3px 10px; margin-right: 6px; font-size: 0.85rem;">'
+                f'{icon_e} {etype}: <strong>{count}</strong></span>'
+            )
+        st.markdown(badge_html, unsafe_allow_html=True)
+
+        # Event table
+        ev_df = events_to_dataframe(video_events, time_offset_s=float(st.session_state.get("video_time_offset_s", 0.0)))
+        st.dataframe(ev_df, use_container_width=True, hide_index=True)
+
+# Scene summary & raw response OUTSIDE the expander (Streamlit forbids nested expanders)
+if st.session_state.get("video_events"):
+    scene = st.session_state.get("video_scene_summary", "")
+    if scene:
+        with st.expander("📝 Scene Narrative Summary", expanded=False):
+            st.markdown(scene)
+
+    with st.expander("🔧 Raw Gemini Response", expanded=False):
+        st.code(st.session_state.get("video_raw_response", ""), language="json")
+
+# ── Data Selection ────────────────────────────────────────────────────────
+raw_filtered = st.session_state.get("raw_filtered")
+
+if raw_filtered is not None:
+    raw = raw_filtered
+    st.success("✨ Currently using **post-filtered** signals (from Preprocessing page).")
+else:
+    raw = rec.build_mne_raw()
+    st.warning("⚠️ Currently using **raw** EEG signals. It is highly recommended to apply filters on the [Preprocessing](./Preprocessing) page first.")
+
+# ── EEG ↔ VR Video Time Synchronisation ───────────────────────────────────
+if st.session_state.get("video_events"):
+    _eeg_dur = raw.times[-1] if hasattr(raw, "times") and len(raw.times) > 0 else rec.metadata.get("duration_s", 0)
+    _vid_dur = st.session_state.get("video_duration_s")  # set during analysis if ffprobe available
+    with st.expander("⏱️ EEG ↔ Video Time Synchronisation", expanded=True):
+        st.markdown(
+            '<p style="color:#8b949e; font-size:0.88rem; margin-bottom:10px;">'
+            'The EEG and VR screen recording may have started at different times. '
+            'Set the <strong>video start offset</strong>: the EEG timestamp (in seconds) '
+            'that corresponds to the first frame of the video. All video event annotations '
+            'will be shifted by this amount on every plot and in all analyses.<br>'
+            '<em>Example: EEG = 360 s, Video = 243 s → if the video started 60 s into '
+            'the EEG, set offset = 60.</em></p>',
+            unsafe_allow_html=True,
+        )
+        sync_col1, sync_col2, sync_col3 = st.columns([2, 1, 1])
+        with sync_col1:
+            _offset_default = float(st.session_state.get("video_time_offset_s", 0.0))
+            _offset_max = max(float(_eeg_dur), 600.0)
+            video_time_offset = st.slider(
+                "Video start offset (s) — EEG time when recording began",
+                min_value=0.0,
+                max_value=_offset_max,
+                value=_offset_default,
+                step=0.5,
+                key="video_offset_slider",
+                help="Drag to shift all video event markers along the EEG timeline.",
+            )
+        with sync_col2:
+            video_time_offset = st.number_input(
+                "Exact offset (s)",
+                min_value=0.0,
+                max_value=_offset_max,
+                value=video_time_offset,
+                step=0.1,
+                format="%.1f",
+                key="video_offset_input",
+            )
+        with sync_col3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            eeg_end = video_time_offset + (_vid_dur if _vid_dur else 0)
+            _dur_str = f"{_vid_dur:.0f} s" if _vid_dur else "unknown"
+            st.markdown(
+                f'<div style="background:#161b22; border:1px solid #30363d; '
+                f'border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#c9d1d9;">'
+                f'📹 Video: <strong>{_dur_str}</strong><br>'
+                f'🧠 EEG: <strong>{_eeg_dur:.0f} s</strong><br>'
+                f'🎯 Video ends at EEG: <strong>{eeg_end:.0f} s</strong>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        st.session_state["video_time_offset_s"] = video_time_offset
+else:
+    video_time_offset = 0.0
 
 # ── Epoch settings ─────────────────────────────────────────────────────────
 st.header("⚙️ Detection Settings")
@@ -219,9 +446,16 @@ epoch_dur = st.session_state.get("anomaly_epoch_dur", 2.0)
 n_epochs = len(list(all_scores.values())[0])
 time_axis = np.arange(n_epochs) * epoch_dur
 
+# Resolve video events for overlays
+_video_events = st.session_state.get("video_events", [])
+_video_offset = float(st.session_state.get("video_time_offset_s", 0.0))
+
 # Resolve trigger info for overlays
+# trigger_time_s is in the VR/video experiment timeline; apply the same
+# sync offset so it aligns with the EEG time axis.
 trigger_info = st.session_state.get("trigger_info")
-_trigger_time = trigger_info["trigger_time_s"] if trigger_info else None
+_trigger_time_raw = trigger_info["trigger_time_s"] if trigger_info else None
+_trigger_time = (_trigger_time_raw + _video_offset) if _trigger_time_raw is not None else None
 _trigger_group = trigger_info["group"] if trigger_info else None
 _trigger_color = (
     "#f0883e" if _trigger_group == "Auditory" else "#58a6ff"
@@ -245,6 +479,8 @@ tab_list = [
 ]
 if _trigger_time is not None:
     tab_list.append("⚡ Trigger Analysis")
+if _video_events:
+    tab_list.append("🎥 Video-Anomaly Analysis")
 tab_list.append("📊 Feature Importance")
 
 tabs = st.tabs(tab_list)
@@ -254,7 +490,15 @@ tab_eeg = tabs[0]
 tab_ml = tabs[1]
 tab_heatmap = tabs[2]
 tab_gallery = tabs[3]
-tab_trigger = tabs[4] if _trigger_time is not None else None
+_tab_idx = 4
+tab_trigger = None
+tab_video = None
+if _trigger_time is not None:
+    tab_trigger = tabs[_tab_idx]
+    _tab_idx += 1
+if _video_events:
+    tab_video = tabs[_tab_idx]
+    _tab_idx += 1
 tab_importance = tabs[-1]
 
 
@@ -315,13 +559,43 @@ def _plot_detector_group(score_dict, colors, threshold_pct):
                 fig.add_annotation(
                     x=_trigger_time, y=1.05, yref="paper",
                     text=f"{_trigger_icon} Trigger ({_trigger_group})",
-                    showarrow=False, font=dict(color=_trigger_color, size=11),
+                    showarrow=False, font=dict(color=_trigger_color, size=13),
                 )
 
+        # Video event overlays
+        if _video_events:
+            add_video_event_overlays(
+                fig, _video_events,
+                row=i + 1, col=1,
+                show_labels=(i == 0),  # labels only on first subplot
+                max_labels=12,
+                time_offset_s=_video_offset,
+            )
+
+    # Add colour-coded event strip along the top (only once for the figure)
+    if _video_events:
+        strip = build_event_strip_trace(_video_events, y_position=0, time_offset_s=_video_offset)
+        if strip:
+            # Use a secondary y-axis pinned to paper coordinates via an
+            # invisible subplot is complex; simpler to add as annotations.
+            # Instead, add coloured markers at the top of each subplot using
+            # the first subplot's y range.
+            fig.add_trace(go.Scattergl(
+                x=strip["x"],
+                y=[np.max(list(score_dict.values())[0]) * 1.15] * len(strip["x"]),
+                mode="markers",
+                marker=strip["marker"],
+                text=strip["text"],
+                hoverinfo="text",
+                name="Video Events",
+                showlegend=True,
+            ), row=1, col=1)
+
+    top_margin = 110 if _video_events else 60
     fig.update_layout(
         template="plotly_dark",
         height=max(350, n * 180),
-        margin=dict(l=60, r=20, t=40, b=40),
+        margin=dict(l=60, r=20, t=top_margin, b=40),
     )
     fig.update_xaxes(title_text="Time (s)", row=n, col=1)
     st.plotly_chart(fig, use_container_width=True)
@@ -400,6 +674,25 @@ with tab_heatmap:
                 annotation_font_color=_trigger_color,
                 annotation_font_size=11,
             )
+        # Video event overlays on heatmap
+        if _video_events:
+            for ev in _video_events:
+                eeg_ts_hm = ev.timestamp_s + _video_offset
+                closest_idx_v = int(np.argmin(np.abs(time_axis - eeg_ts_hm)))
+                color_v = EVENT_COLORS.get(ev.event_type, "#8b949e")
+                fig_hm.add_vline(
+                    x=closest_idx_v, line_dash="dot",
+                    line_color=color_v, line_width=1.2, opacity=0.7,
+                )
+            # Single legend annotation
+            fig_hm.add_annotation(
+                x=0.5, y=-0.12, xref="paper", yref="paper",
+                text=" | ".join(
+                    f'<span style="color:{c}">{EVENT_ICONS[t]} {t}</span>'
+                    for t, c in EVENT_COLORS.items()
+                ),
+                showarrow=False, font=dict(size=10),
+            )
         st.plotly_chart(fig_hm, use_container_width=True)
     else:
         st.info("No epoch data available.")
@@ -466,7 +759,7 @@ with tab_gallery:
                         ticktext=ch_names[:n_ch_show],
                     ),
                     showlegend=False,
-                    margin=dict(l=80, r=20, t=10, b=40),
+                    margin=dict(l=80, r=20, t=50, b=40),
                 )
                 st.plotly_chart(fig_ep, use_container_width=True, key=f"gallery_{ep_idx}")
     else:
@@ -861,6 +1154,361 @@ if tab_trigger is not None:
                 )
         else:
             st.info("Too few flagged anomalies to compute a proximity distribution.")
+
+# ── Tab: Video-Anomaly Analysis ───────────────────────────────────────────
+if tab_video is not None:
+  with tab_video:
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, #161b22 0%, #1c2333 100%);
+                    border: 1px solid #30363d; border-radius: 10px; padding: 16px 20px;
+                    margin-bottom: 1.2rem; line-height: 1.6;">
+            <h4 style="color: #f0883e; margin: 0 0 6px 0; font-size: 1rem;">
+                🎥 Multi-Modal Video–EEG Anomaly Analysis
+            </h4>
+            <p style="color: #8b949e; font-size: 0.84rem; margin: 0;">
+                This section correlates <strong>behavioural events</strong> extracted from the
+                VR screen recording with <strong>EEG anomaly scores</strong>. It answers the
+                key research question: <em>Are detected EEG anomalies temporally associated with
+                observable behavioural events (head movements, gaze shifts, sudden actions)?</em>
+                Analyses include a unified multi-modal timeline, temporal coincidence testing,
+                event-locked ERP averaging, and pre/post event anomaly comparisons.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Settings
+    va_col1, va_col2 = st.columns(2)
+    with va_col1:
+        coincidence_window = st.number_input(
+            "Coincidence window (±s)", 1.0, 15.0, 3.0, 1.0, key="va_coinc_win",
+            help="Time window around each video event to check for anomaly epochs.",
+        )
+    with va_col2:
+        erp_pre = st.number_input("ERP pre-event (s)", 0.5, 5.0, 1.0, 0.5, key="va_erp_pre")
+        erp_post = st.number_input("ERP post-event (s)", 0.5, 10.0, 2.0, 0.5, key="va_erp_post")
+
+    st.markdown("---")
+
+    # ── 1. Multi-Modal Timeline ────────────────────────────────────────
+    st.subheader("1. Multi-Modal Timeline")
+    st.markdown(
+        '<p style="color: #8b949e; font-size: 0.85rem;">Unified visualisation '
+        'showing ensemble anomaly scores (top) and video events (bottom), aligned '
+        'on the same time axis. Coloured vertical lines connect behavioural events '
+        'to their temporal position in the EEG anomaly landscape.</p>',
+        unsafe_allow_html=True,
+    )
+
+    ensemble_sc = all_scores.get("Ensemble", np.array([]))
+    if len(ensemble_sc) > 0:
+        fig_timeline = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            subplot_titles=["Ensemble Anomaly Score", "Behavioural Events"],
+            row_heights=[0.7, 0.3],
+            vertical_spacing=0.08,
+        )
+
+        # Top: Ensemble score line
+        thresh_val_tl = np.percentile(ensemble_sc, threshold)
+        is_anom_tl = ensemble_sc > thresh_val_tl
+
+        fig_timeline.add_trace(go.Scatter(
+            x=time_axis, y=ensemble_sc, mode="lines",
+            name="Ensemble Score", line=dict(color="#ff7b72", width=1.5),
+        ), row=1, col=1)
+
+        fig_timeline.add_trace(go.Scatter(
+            x=time_axis[is_anom_tl], y=ensemble_sc[is_anom_tl],
+            mode="markers", name="Anomalies",
+            marker=dict(color="#ff7b72", size=7, symbol="x"),
+        ), row=1, col=1)
+
+        fig_timeline.add_hline(
+            y=thresh_val_tl, line_dash="dash",
+            line_color="rgba(255,255,255,0.3)", row=1, col=1,
+        )
+
+        # Bottom: Event strip
+        for ev in _video_events:
+            color = EVENT_COLORS.get(ev.event_type, "#8b949e")
+            icon_e = EVENT_ICONS.get(ev.event_type, "📌")
+            sev_h = SEVERITY_SIZE.get(ev.severity, 8)
+            eeg_ts = ev.timestamp_s + _video_offset  # align to EEG time
+
+            fig_timeline.add_trace(go.Scatter(
+                x=[eeg_ts], y=[ev.event_type],
+                mode="markers+text",
+                marker=dict(color=color, size=sev_h, symbol="diamond"),
+                text=[icon_e],
+                textposition="top center",
+                textfont=dict(size=10),
+                hovertext=f"{icon_e} {ev.description[:60]}<br>Severity: {ev.severity}<br>Video t={ev.timestamp_s:.1f}s  EEG t={eeg_ts:.1f}s",
+                hoverinfo="text",
+                showlegend=False,
+            ), row=2, col=1)
+
+            # Connecting vertical line spanning both subplots
+            fig_timeline.add_vline(
+                x=eeg_ts, line_dash="dot",
+                line_color=color, line_width=0.8, opacity=0.5,
+            )
+
+        # Trigger overlay if available
+        if _trigger_time is not None:
+            fig_timeline.add_vline(
+                x=_trigger_time, line_dash="dash",
+                line_color=_trigger_color, line_width=2,
+            )
+            fig_timeline.add_annotation(
+                x=_trigger_time, y=1.05, yref="paper",
+                text=f"{_trigger_icon} Trigger",
+                showarrow=False, font=dict(color=_trigger_color, size=13),
+            )
+
+        fig_timeline.update_layout(
+            template="plotly_dark", height=500,
+            margin=dict(l=60, r=20, t=90, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        fig_timeline.update_xaxes(title_text="Time (s)", row=2, col=1)
+        fig_timeline.update_yaxes(title_text="Score", row=1, col=1)
+        st.plotly_chart(fig_timeline, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── 2. Temporal Coincidence Analysis ───────────────────────────────
+    st.subheader("2. Video Event–Anomaly Temporal Coincidence")
+    st.markdown(
+        '<p style="color: #8b949e; font-size: 0.85rem;">For each video event, '
+        'checks whether an EEG anomaly epoch falls within the specified time window. '
+        'A permutation test (n=1000) assesses if the observed coincidence rate '
+        'exceeds chance expectation.</p>',
+        unsafe_allow_html=True,
+    )
+
+    if len(ensemble_sc) > 0:
+        coincidence = compute_event_anomaly_coincidence(
+            _video_events, ensemble_sc, epoch_dur,
+            window_s=coincidence_window,
+            threshold_pct=float(threshold),
+            time_offset_s=_video_offset,
+        )
+
+        # Summary metrics
+        c_col1, c_col2, c_col3, c_col4 = st.columns(4)
+        c_col1.metric("Total Events", len(_video_events))
+        c_col2.metric("Coincident", coincidence["observed_count"])
+        c_col3.metric(
+            "Coincidence Rate",
+            f"{coincidence['overall_rate']:.1%}",
+            delta=f"vs {coincidence['expected_rate']:.1%} expected",
+            delta_color="normal",
+        )
+        c_col4.metric("p-value", f"{coincidence['p_value']:.4f}")
+
+        if coincidence["p_value"] < 0.05:
+            fold = coincidence["overall_rate"] / max(coincidence["expected_rate"], 1e-6)
+            st.success(
+                f"EEG anomalies cluster significantly around video events "
+                f"(p = {coincidence['p_value']:.4f}, {fold:.1f}× enrichment). "
+                f"This suggests detected anomalies are **behaviourally driven**."
+            )
+        else:
+            st.info(
+                "No significant temporal clustering of anomalies around video events "
+                f"(p = {coincidence['p_value']:.4f})."
+            )
+
+        # Per-event coincidence table
+        pe_df = pd.DataFrame(coincidence["per_event"])
+        pe_df["coincides"] = pe_df["coincides"].map({True: "✅ Yes", False: "❌ No"})
+        st.dataframe(pe_df, use_container_width=True, hide_index=True)
+
+        # By event type bar chart
+        if coincidence["by_type"]:
+            bt = coincidence["by_type"]
+            types_list = list(bt.keys())
+            fig_bt = go.Figure()
+            fig_bt.add_trace(go.Bar(
+                x=[f"{EVENT_ICONS.get(t, '📌')} {t}" for t in types_list],
+                y=[bt[t]["rate"] * 100 for t in types_list],
+                marker_color=[EVENT_COLORS.get(t, "#8b949e") for t in types_list],
+                text=[f"{bt[t]['n_coincident']}/{bt[t]['n_events']}" for t in types_list],
+                textposition="auto",
+            ))
+            fig_bt.update_layout(
+                template="plotly_dark", height=350,
+                yaxis_title="Coincidence Rate (%)",
+                xaxis_title="Event Type",
+                margin=dict(l=60, r=20, t=20, b=80),
+            )
+            st.plotly_chart(fig_bt, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── 3. Event-Locked ERP Analysis ───────────────────────────────────
+    st.subheader("3. Event-Locked EEG Response (ERP)")
+    st.markdown(
+        '<p style="color: #8b949e; font-size: 0.85rem;">Grand-average EEG '
+        'response time-locked to each type of video event, analogous to '
+        'Event-Related Potential (ERP) analysis. Shows the average neural '
+        'response pattern around behavioural events. Shaded regions indicate '
+        '±1 SD across events. Requires ≥2 events of a given type.</p>',
+        unsafe_allow_html=True,
+    )
+
+    erp_data = compute_event_locked_erp(
+        _video_events, raw,
+        pre_s=erp_pre, post_s=erp_post,
+        time_offset_s=_video_offset,
+    )
+
+    if erp_data:
+        for etype, erpd in erp_data.items():
+            icon_e = EVENT_ICONS.get(etype, "📌")
+            color_e = EVENT_COLORS.get(etype, "#8b949e")
+            n_ev = erpd["n_events"]
+            caveat = " ⚠️ *Low N — interpret with caution*" if n_ev < 5 else ""
+
+            st.markdown(
+                f"#### {icon_e} {etype} (N = {n_ev}){caveat}"
+            )
+
+            grand_avg = erpd["grand_avg"] * 1e6  # V → µV
+            std_dev = erpd["std"] * 1e6
+            t_erp = erpd["time_axis"]
+            ch_names_erp = erpd["ch_names"]
+            n_ch_show = min(8, len(ch_names_erp))
+
+            fig_erp = go.Figure()
+            for ch_i in range(n_ch_show):
+                fig_erp.add_trace(go.Scatter(
+                    x=t_erp, y=grand_avg[ch_i],
+                    mode="lines", name=ch_names_erp[ch_i],
+                    line=dict(width=1.2),
+                ))
+                # ±1 SD band
+                fig_erp.add_trace(go.Scatter(
+                    x=np.concatenate([t_erp, t_erp[::-1]]),
+                    y=np.concatenate([
+                        grand_avg[ch_i] + std_dev[ch_i],
+                        (grand_avg[ch_i] - std_dev[ch_i])[::-1],
+                    ]),
+                    fill="toself",
+                    fillcolor=f"rgba(255,255,255,0.04)",
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ))
+
+            # Event onset line at t=0
+            fig_erp.add_vline(
+                x=0, line_dash="dash", line_color=color_e, line_width=2,
+                annotation_text=f"{icon_e} Event onset",
+                annotation_font_color=color_e,
+            )
+
+            fig_erp.update_layout(
+                template="plotly_dark", height=350,
+                xaxis_title="Time relative to event (s)",
+                yaxis_title="Amplitude (µV)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                margin=dict(l=60, r=20, t=40, b=60),
+            )
+            st.plotly_chart(fig_erp, use_container_width=True, key=f"erp_{etype}")
+    else:
+        st.info("Not enough events (≥2 of the same type) within the recording range for ERP analysis.")
+
+    st.markdown("---")
+
+    # ── 4. Pre / Post Event Anomaly Comparison ─────────────────────────
+    st.subheader("4. Pre / Post Event Anomaly Comparison")
+    st.markdown(
+        '<p style="color: #8b949e; font-size: 0.85rem;">Mann-Whitney U test '
+        'comparing anomaly score distributions before vs. after video events, '
+        'grouped by event type. Cohen\'s d quantifies effect size. Positive '
+        'change indicates anomaly scores increase after the behavioural event, '
+        'suggesting the event elicited a neural anomaly response.</p>',
+        unsafe_allow_html=True,
+    )
+
+    event_stats_df = compute_event_anomaly_stats(
+        _video_events, all_scores, epoch_dur,
+        window_s=coincidence_window * 2,
+        time_offset_s=_video_offset,
+    )
+
+    if not event_stats_df.empty:
+        # Pivot: bar chart of Change % by event type and detector
+        etypes_in_stats = event_stats_df["Event Type"].unique()
+        for et in etypes_in_stats:
+            subset = event_stats_df[event_stats_df["Event Type"] == et]
+            st.markdown(f"**{et}** (N = {subset.iloc[0]['N Events']})")
+
+            fig_pp = go.Figure()
+            fig_pp.add_trace(go.Bar(
+                name="Pre-event", x=subset["Detector"], y=subset["Pre Mean"],
+                marker_color="#58a6ff", opacity=0.8,
+            ))
+            fig_pp.add_trace(go.Bar(
+                name="Post-event", x=subset["Detector"], y=subset["Post Mean"],
+                marker_color="#ff7b72", opacity=0.8,
+            ))
+
+            for _, row in subset.iterrows():
+                pv = row["p-value"]
+                if isinstance(pv, str):
+                    continue
+                y_pos = max(row["Pre Mean"], row["Post Mean"]) * 1.08
+                star = ""
+                if pv < 0.001:
+                    star = "***"
+                elif pv < 0.01:
+                    star = "**"
+                elif pv < 0.05:
+                    star = "*"
+                if star:
+                    fig_pp.add_annotation(
+                        x=row["Detector"], y=y_pos, text=star,
+                        showarrow=False, font=dict(color="#ffa657", size=14),
+                    )
+
+            fig_pp.update_layout(
+                template="plotly_dark", barmode="group", height=350,
+                yaxis_title="Mean anomaly score",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                margin=dict(l=60, r=20, t=30, b=80),
+            )
+            st.plotly_chart(fig_pp, use_container_width=True, key=f"pp_{et}")
+
+        # Full stats table
+        st.dataframe(event_stats_df, use_container_width=True, hide_index=True)
+
+        # Interpretation
+        sig_rows = event_stats_df[
+            event_stats_df["p-value"].apply(
+                lambda x: isinstance(x, (int, float)) and x < 0.05
+            )
+        ]
+        if len(sig_rows) > 0:
+            st.success(
+                f"**{len(sig_rows)}** event-type × detector combinations show "
+                "statistically significant (p < 0.05) pre/post anomaly score changes. "
+                "This supports the hypothesis that these behavioural events are "
+                "associated with measurable neural responses."
+            )
+        else:
+            st.info(
+                "No statistically significant pre/post differences found (p < 0.05)."
+            )
+    else:
+        st.info(
+            "Insufficient data for pre/post analysis. Need ≥2 events of the same type "
+            "with enough surrounding epochs."
+        )
 
 # ── Tab: Feature Importance ───────────────────────────────────────────────
 with tab_importance:

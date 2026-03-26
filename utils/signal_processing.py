@@ -31,11 +31,32 @@ def apply_notch(
     raw: mne.io.RawArray,
     freqs: float | list[float] = 60.0,
 ) -> mne.io.RawArray:
-    """Apply notch filter at specified frequency/frequencies (in-place copy)."""
+    """Apply notch filter at specified frequency/frequencies (in-place copy).
+    Uses IIR method for sharper attenuation and includes harmonics.
+    """
     raw_filtered = raw.copy()
     if isinstance(freqs, (int, float)):
         freqs = [freqs]
-    raw_filtered.notch_filter(freqs, method="fir", verbose=False)
+    
+    # Generate harmonics up to Nyquist to ensure thorough filtering
+    sfreq = raw.info['sfreq']
+    nyquist = sfreq / 2.0
+    all_freqs = []
+    for f in freqs:
+        h = f
+        while h < nyquist:
+            all_freqs.append(h)
+            h += f
+    
+    if not all_freqs:
+        return raw_filtered
+
+    # IIR filters are generally more effective for notch filtering power line noise
+    raw_filtered.notch_filter(
+        all_freqs, 
+        method="iir", 
+        verbose=False
+    )
     return raw_filtered
 
 

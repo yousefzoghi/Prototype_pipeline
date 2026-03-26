@@ -56,6 +56,7 @@ def generate_summary(
     survey_responses: dict | None = None,
     trigger_info: dict | None = None,
     trigger_stats: dict | None = None,
+    video_events: list | None = None,
 ) -> str:
     """Generate a natural-language summary of the EEG recording analysis.
 
@@ -236,6 +237,41 @@ def generate_summary(
             for e in trigger_info["explanations"]:
                 lines.append(f"- {e}")
 
+    # VR behavioural events from screen recording
+    if video_events:
+        type_counts: dict[str, int] = {}
+        for ev in video_events:
+            type_counts[ev.event_type] = type_counts.get(ev.event_type, 0) + 1
+        summary_parts = ", ".join(
+            f"{count} {etype}" for etype, count in sorted(type_counts.items())
+        )
+        lines.append(
+            f"\n**VR Behavioural Events ({len(video_events)} total):** "
+            f"Screen-recording analysis identified: {summary_parts}."
+        )
+        major_events = [ev for ev in video_events if ev.severity == "major"]
+        if major_events:
+            sample = "; ".join(
+                f"{ev.event_type} @ {ev.timestamp_s:.1f}s"
+                for ev in major_events[:6]
+            )
+            lines.append(
+                f"- **{len(major_events)} major events** detected "
+                f"(most likely to correlate with EEG responses): {sample}."
+            )
+        sudden = [ev for ev in video_events if ev.event_type == "sudden_action"]
+        if sudden:
+            lines.append(
+                f"- {len(sudden)} sudden movement/action events — prime candidates "
+                "for EEG orienting responses (N200, P300 components)."
+            )
+        environmental = [ev for ev in video_events if ev.event_type == "environmental"]
+        if environmental:
+            lines.append(
+                f"- {len(environmental)} environmental changes (alarms, stimuli) — "
+                "expect P300 and arousal-related alpha suppression near these timestamps."
+            )
+
     return "\n".join(lines)
 
 
@@ -250,6 +286,7 @@ def generate_llm_summary(
     survey_responses: dict | None = None,
     trigger_info: dict | None = None,
     trigger_stats: dict | None = None,
+    video_events: list | None = None,
 ) -> str:
     """Generate an AI summary using an LLM (Ollama or OpenRouter)."""
 
@@ -342,13 +379,40 @@ def generate_llm_summary(
             "Theta changes = stress). "
         )
 
+    video_clause = ""
+    if video_events:
+        type_counts: dict[str, int] = {}
+        for ev in video_events:
+            type_counts[ev.event_type] = type_counts.get(ev.event_type, 0) + 1
+        context.append(
+            f"\nVR Screen Recording Behavioural Events ({len(video_events)} total): "
+            + ", ".join(f"{c} {t}" for t, c in sorted(type_counts.items()))
+        )
+        major_ev = [ev for ev in video_events if ev.severity == "major"]
+        if major_ev:
+            context.append(f"Major events ({len(major_ev)}):")
+            for ev in major_ev[:10]:
+                context.append(
+                    f"  - {ev.event_type} @ t={ev.timestamp_s:.1f}s: "
+                    f"{ev.description[:70]}"
+                )
+        video_clause = (
+            " The session also includes VR screen-recording analysis: "
+            f"{len(video_events)} behavioural events were detected "
+            f"({', '.join(f'{c} {t}' for t, c in sorted(type_counts.items()))}). "
+            "Discuss whether the detected EEG anomalies or spectral changes "
+            "temporally coincide with the major VR events (head movements, "
+            "sudden actions, environmental stimuli). "
+        )
+
     prompt = (
         "You are an expert neuroscientist and data analyst. "
         "Analyze the following EEG session summary data and provide a concise, "
         "professional report. Highlight the spectral composition, potential artifacts "
         "(suggested by anomalies), and any psychological context from the survey. "
-        + trigger_clause +
-        "Do not hallucinate data not present here.\n\n"
+        + trigger_clause
+        + video_clause
+        + "Do not hallucinate data not present here.\n\n"
         "DATA:\n" + "\n".join(context)
     )
 

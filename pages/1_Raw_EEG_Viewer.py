@@ -12,6 +12,10 @@ from utils.sidebar import render_sidebar, render_sidebar_footer
 render_sidebar()
 render_sidebar_footer()
 
+from analysis.video_analysis import (
+    add_video_event_overlays, EVENT_COLORS, EVENT_ICONS,
+)
+
 st.title("Raw EEG Viewer")
 
 rec = st.session_state.get("active_rec")
@@ -98,7 +102,46 @@ fig.update_layout(
     dragmode="zoom",
 )
 
+# ── Video event overlays ──────────────────────────────────────────────────
+_video_events = st.session_state.get("video_events", [])
+_video_offset = float(st.session_state.get("video_time_offset_s", 0.0))
+if _video_events:
+    t_start = float(time_axis[0]) if len(time_axis) > 0 else 0.0
+    t_end = float(time_axis[-1]) if len(time_axis) > 0 else 0.0
+    # Filter by EEG-aligned timestamp (video_time + offset)
+    visible_events = [
+        ev for ev in _video_events
+        if t_start <= (ev.timestamp_s + _video_offset) <= t_end
+    ]
+    if visible_events:
+        add_video_event_overlays(
+            fig, visible_events,
+            time_range=(t_start, t_end),
+            show_labels=True,
+            max_labels=10,
+            time_offset_s=_video_offset,
+        )
+        fig.update_layout(margin=dict(l=60, r=20, t=110, b=60))
+
 st.plotly_chart(fig, use_container_width=True, key="raw_viewer")
+
+# Video event legend (below plot)
+if _video_events:
+    offset_note = f" &nbsp;|&nbsp; ⏱️ offset: <strong>{_video_offset:+.1f}s</strong>" if _video_offset != 0.0 else ""
+    legend_html = (
+        '<div style="background: #161b22; border: 1px solid #30363d; '
+        'border-radius: 8px; padding: 8px 14px; margin-bottom: 1rem;">'
+        '<span style="color: #8b949e; font-size: 0.8rem; margin-right: 10px;">'
+        f'<strong>Video Events:</strong>{offset_note}&nbsp;&nbsp;</span>'
+    )
+    for etype, color in EVENT_COLORS.items():
+        icon = EVENT_ICONS.get(etype, "📌")
+        legend_html += (
+            f'<span style="color: {color}; font-size: 0.8rem; margin-right: 10px;">'
+            f'{icon} {etype}</span>'
+        )
+    legend_html += '</div>'
+    st.markdown(legend_html, unsafe_allow_html=True)
 
 # ── Annotation tools ───────────────────────────────────────────────────────
 with st.expander("Annotation Tools", expanded=False):
