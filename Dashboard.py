@@ -18,6 +18,7 @@ st.set_page_config(
 
 # ── Shared sidebar (CSS + footer) ─────────────────────────────────────────
 from utils.sidebar import render_sidebar, render_sidebar_footer
+from utils.signal_processing import DEFAULT_MAPPING, apply_standard_montage
 
 render_sidebar()
 

@@ -22,7 +22,7 @@ if rec is None:
     st.warning("No recording loaded. Please upload a file on the main page.")
     st.stop()
 
-from utils.signal_processing import compute_psd, compute_band_powers, FREQ_BANDS
+from utils.signal_processing import compute_psd, compute_band_powers, FREQ_BANDS, DEFAULT_MAPPING
 
 # ── Data Selection ────────────────────────────────────────────────────────
 raw_filtered = st.session_state.get("raw_filtered")
@@ -37,6 +37,24 @@ else:
 # ── PSD ────────────────────────────────────────────────────────────────────
 st.header("Power Spectral Density")
 
+# Add time slider for PSD analysis
+total_duration = raw.times[-1]
+start_time, end_time = st.slider(
+    "Select time range for PSD analysis (seconds)",
+    min_value=0.0,
+    max_value=total_duration,
+    value=(0.0, total_duration), # Default to the whole recording
+    step=0.1,
+    format="%1.1f s",
+    key="psd_time_slider"
+)
+
+# Slice the raw data based on the selected time range
+raw_psd_segment = raw.copy().crop(tmin=start_time, tmax=end_time)
+
+# Use raw.ch_names instead of rec.ch_names to get currently active names (e.g. 10-20 montage)
+active_ch_names = [str(ch) for ch in raw.ch_names]
+
 col1, col2, col3 = st.columns(3)
 with col1:
     n_fft = st.select_slider("FFT size", options=[64, 128, 256, 512, 1024], value=256)
@@ -45,18 +63,25 @@ with col2:
 with col3:
     fmax_psd = st.number_input("Max freq (Hz)", min_value=1.0, value=60.0, step=5.0)
 
-ch_psd = st.multiselect("Channels for PSD", options=rec.ch_names, default=rec.ch_names[:4])
+ch_psd = st.multiselect(
+    "Channels for PSD", 
+    options=active_ch_names, 
+    default=active_ch_names[:4],
+    format_func=lambda x: DEFAULT_MAPPING.get(x, x)
+)
 
 if ch_psd:
+    # Ensure picks is a list of standard strings
+    picks = [str(ch) for ch in ch_psd]
     with st.spinner("Computing PSD..."):
-        raw_pick = raw.copy().pick(ch_psd)
+        raw_pick = raw_psd_segment.pick(picks)
         psds, freqs = compute_psd(raw_pick, fmin=fmin_psd, fmax=fmax_psd, n_fft=n_fft)
 
     fig_psd = go.Figure()
     for i, ch in enumerate(ch_psd):
         fig_psd.add_trace(go.Scatter(
-            x=freqs, y=10 * np.log10(psds[i] + 1e-20),
-            mode="lines", name=ch, line=dict(width=1.5),
+            x=freqs, y=120 + 10 * np.log10(psds[i] + 1e-20),
+            mode="lines", name=DEFAULT_MAPPING.get(ch, ch), line=dict(width=1.5),
         ))
 
     # Add band shading
@@ -70,15 +95,16 @@ if ch_psd:
 
     fig_psd.update_layout(
         template="plotly_dark", height=450,
-        xaxis_title="Frequency (Hz)", yaxis_title="Power (dB)",
+        xaxis_title="Frequency (Hz)", yaxis_title="Power (dB ref 1µV²/Hz)",
         margin=dict(l=60, r=20, t=40, b=60),
     )
     st.plotly_chart(fig_psd, use_container_width=True)
 
     # ── Band Power Bar Chart ───────────────────────────────────────────────
     st.header("Band Power Distribution")
-    bp = compute_band_powers(psds, freqs)
-    bp.index = ch_psd
+    # Convert PSDs to µV²/Hz for band power calculation to keep it consistent
+    bp = compute_band_powers(psds * 1e12, freqs)
+    bp.index = [DEFAULT_MAPPING.get(ch, ch) for ch in ch_psd]
 
     fig_bp = go.Figure()
     band_colors = ["#6495ED", "#90EE90", "#FFD700", "#FFA500", "#FF6347"]
@@ -91,7 +117,7 @@ if ch_psd:
     fig_bp.update_layout(
         template="plotly_dark", height=400,
         barmode="group",
-        xaxis_title="Channel", yaxis_title="Mean Power (V²/Hz)",
+        xaxis_title="Channel", yaxis_title="Mean Power (µV²/Hz)",
         margin=dict(l=60, r=20, t=40, b=60),
     )
     st.plotly_chart(fig_bp, use_container_width=True)
@@ -99,7 +125,12 @@ if ch_psd:
 # ── Spectrogram ────────────────────────────────────────────────────────────
 st.header("Time-Frequency Spectrogram")
 
-ch_spec = st.selectbox("Channel for spectrogram", options=rec.ch_names, index=0)
+ch_spec = st.selectbox(
+    "Channel for spectrogram", 
+    options=active_ch_names, 
+    index=0,
+    format_func=lambda x: DEFAULT_MAPPING.get(x, x)
+)
 
 spec_col1, spec_col2 = st.columns(2)
 with spec_col1:
@@ -107,8 +138,9 @@ with spec_col1:
 with spec_col2:
     noverlap_pct = st.slider("Overlap %", 0, 90, 75, step=5)
 
-ch_idx = rec.ch_names.index(ch_spec)
-data_ch = raw.get_data(picks=ch_idx)[0]
+# Use index from active_ch_names to pick from raw data
+ch_idx = active_ch_names.index(str(ch_spec))
+data_ch = raw.get_data(picks=[ch_idx])[0]
 noverlap = int(nperseg * noverlap_pct / 100)
 
 with st.spinner("Computing spectrogram..."):
@@ -119,18 +151,18 @@ with st.spinner("Computing spectrogram..."):
 # Limit to 60 Hz for display
 freq_mask = f_spec <= 60
 fig_spec = go.Figure(data=go.Heatmap(
-    z=10 * np.log10(Sxx[freq_mask, :] + 1e-20),
+    z=120 + 10 * np.log10(Sxx[freq_mask, :] + 1e-20),
     x=t_spec,
     y=f_spec[freq_mask],
     colorscale="Viridis",
-    colorbar=dict(title="dB"),
+    colorbar=dict(title="dB ref 1µV²/Hz"),
 ))
 
 fig_spec.update_layout(
     template="plotly_dark", height=400,
     xaxis_title="Time (s)", yaxis_title="Frequency (Hz)",
-    title=f"Spectrogram — {ch_spec}",
-    margin=dict(l=60, r=20, t=60, b=60),
+    title="Spectrogram",
+    margin=dict(l=60, r=20, t=60, b=60)
 )
 st.plotly_chart(fig_spec, use_container_width=True)
 
@@ -166,17 +198,17 @@ with st.spinner("Computing wavelet transform..."):
         cwt_matrix[i, :] = np.abs(conv)
 
 fig_wav = go.Figure(data=go.Heatmap(
-    z=10 * np.log10(cwt_matrix ** 2 + 1e-20),
+    z=120 + 10 * np.log10(cwt_matrix ** 2 + 1e-20),
     x=t_wav,
     y=wav_freqs,
     colorscale="Magma",
-    colorbar=dict(title="dB"),
+    colorbar=dict(title="dB ref 1µV²/Hz"),
 ))
 
 fig_wav.update_layout(
     template="plotly_dark", height=400,
     xaxis_title="Time (s)", yaxis_title="Frequency (Hz)",
-    title=f"Wavelet Scalogram — {ch_spec} (first {len(sig_short)/rec.sfreq:.0f} s)",
+    title=f"Wavelet Scalogram — {DEFAULT_MAPPING.get(ch_spec, ch_spec)} (first {len(sig_short)/rec.sfreq:.0f} s)",
     margin=dict(l=60, r=20, t=60, b=60),
 )
 st.plotly_chart(fig_wav, use_container_width=True)

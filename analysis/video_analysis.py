@@ -710,11 +710,15 @@ def add_video_event_overlays(
             icon = EVENT_ICONS.get(ev.event_type, "📌")
             sev_marker = "❗" if ev.severity == "major" else ""
             short_desc = ev.description[:28] + ("…" if len(ev.description) > 28 else "")
-            # Stagger horizontally across 5 slots to separate overlapping labels
-            ax_offset = (label_count % 5 - 2) * 40
+            
+            # Stagger both horizontally and vertically across 4 levels to separate overlapping labels
+            # ay is the vertical offset (negative is up), ax is horizontal.
+            ax_offset = (label_count % 4 - 1.5) * 30
+            ay_offset = -45 - (label_count % 4) * 45
+            
             fig.add_annotation(
                 x=plot_ts,
-                y=1.10,
+                y=1.02, # Closer to the plot than 1.10 to save space
                 yref="paper",
                 text=f"{icon}{sev_marker} {short_desc}",
                 showarrow=True,
@@ -723,10 +727,10 @@ def add_video_event_overlays(
                 arrowwidth=1.5,
                 arrowcolor=color,
                 ax=ax_offset,
-                ay=-55,
-                font=dict(color=color, size=12),
+                ay=ay_offset,
+                font=dict(color=color, size=11),
                 align="center",
-                bgcolor="rgba(13,17,23,0.75)",
+                bgcolor="rgba(13,17,23,0.85)",
                 bordercolor=color,
                 borderwidth=1,
                 borderpad=3,

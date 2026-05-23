@@ -31,63 +31,14 @@ if raw_filtered is not None:
     raw = raw_filtered
     st.success("✨ Currently using **post-filtered** signals (from Preprocessing page).")
 else:
-    raw = rec.build_mne_raw()
+    raw = st.session_state.get("raw_base")
+    if raw is None:
+        raw = rec.build_mne_raw()
     st.warning("⚠️ Currently using **raw** EEG signals. Topomaps may be noisy without bandpass filtering.")
 
-# ── Montage Selection ──────────────────────────────────────────────────────
-st.header("Montage Configuration")
-
-# Standard 10-20 channel mapping for OpenBCI Cyton+Daisy 16-channel
-DEFAULT_MAPPING = {
-    "EXG Channel 0": "Fp1", "EXG Channel 1": "Fp2",
-    "EXG Channel 2": "C3",  "EXG Channel 3": "C4",
-    "EXG Channel 4": "P7",  "EXG Channel 5": "P8",
-    "EXG Channel 6": "O1",  "EXG Channel 7": "O2",
-    "EXG Channel 8": "F7",  "EXG Channel 9": "F8",
-    "EXG Channel 10": "F3", "EXG Channel 11": "F4",
-    "EXG Channel 12": "T7", "EXG Channel 13": "T8",
-    "EXG Channel 14": "P3", "EXG Channel 15": "P4",
-}
-
-use_custom = st.checkbox("Use custom 10-20 mapping", value=True)
-
-if use_custom:
-    st.info("Default mapping assumes OpenBCI Cyton+Daisy. Adjust as needed.")
-
-    # Let user edit the mapping
-    mapping = {}
-    cols = st.columns(4)
-    for i, ch in enumerate(rec.ch_names):
-        default_name = DEFAULT_MAPPING.get(ch, ch)
-        new_name = cols[i % 4].text_input(f"{ch} →", value=default_name, key=f"map_{ch}")
-        mapping[ch] = new_name
-
-    # Apply rename and montage
-    try:
-        raw_topo = raw.copy()
-        rename_dict = {old: new for old, new in mapping.items() if old in raw_topo.ch_names}
-        raw_topo.rename_channels(rename_dict)
-
-        montage = mne.channels.make_standard_montage("standard_1020")
-        # Keep only channels that exist in the montage
-        valid_chs = [ch for ch in raw_topo.ch_names if ch in montage.ch_names]
-        if valid_chs:
-            raw_topo.pick(valid_chs)
-            raw_topo.set_montage(montage, on_missing="ignore")
-        else:
-            st.error("No channels match the standard 10-20 montage. Check your mapping.")
-            st.stop()
-    except Exception as e:
-        st.error(f"Error setting montage: {e}")
-        st.stop()
-else:
-    raw_topo = raw.copy()
-    try:
-        montage = mne.channels.make_standard_montage("standard_1020")
-        raw_topo.set_montage(montage, on_missing="ignore")
-    except Exception:
-        st.warning("Could not auto-apply montage. Channel names may not match standard 10-20.")
-        st.stop()
+# The montage is now handled globally in the sidebar/Dashboard.
+# raw_base already has the montage applied if the user selected it.
+raw_topo = raw
 
 # ── Band Power Topomaps ────────────────────────────────────────────────────
 st.header("Band Power Topomaps")

@@ -10,50 +10,105 @@ import mne
 import numpy as np
 import pandas as pd
 from scipy import signal as sp_signal
+import pywt  # Import pywt at the top level for WPT
 
+# ---------------------------------------------------------------------------
+# Montage & Channel Mapping
+# ---------------------------------------------------------------------------
+
+# Standard 10-20 channel mapping for OpenBCI Cyton+Daisy 16-channel
+DEFAULT_MAPPING = {
+    "EXG Channel 0": "Fp1", "EXG Channel 1": "Fp2",
+    "EXG Channel 2": "C3",  "EXG Channel 3": "C4",
+    "EXG Channel 4": "P7",  "EXG Channel 5": "P8",
+    "EXG Channel 6": "O1",  "EXG Channel 7": "O2",
+    "EXG Channel 8": "F7",  "EXG Channel 9": "F8",
+    "EXG Channel 10": "F3", "EXG Channel 11": "F4",
+    "EXG Channel 12": "T7", "EXG Channel 13": "T8",
+    "EXG Channel 14": "P3", "EXG Channel 15": "P4",
+}
+
+def apply_standard_montage(raw: mne.io.BaseRaw, mapping: dict[str, str] = None) -> mne.io.BaseRaw:
+    """Rename channels and apply standard 10-20 montage.
+    
+    Returns a copy of the raw object with channels renamed and montage set.
+    """
+    raw_new = raw.copy()
+    if mapping:
+        rename_dict = {old: new for old, new in mapping.items() if old in raw_new.ch_names}
+        raw_new.rename_channels(rename_dict)
+    
+    montage = mne.channels.make_standard_montage("standard_1020")
+    # Keep only channels that exist in the montage for ICA/Topography
+    valid_chs = [ch for ch in raw_new.ch_names if ch in montage.ch_names]
+    if valid_chs:
+        raw_new.pick(valid_chs)
+        raw_new.set_montage(montage, on_missing="ignore")
+    return raw_new
 
 # ---------------------------------------------------------------------------
 # Filtering
 # ---------------------------------------------------------------------------
 
-def apply_bandpass(
+def apply_custom_filter(
     raw: mne.io.RawArray,
     l_freq: float = 1.0,
     h_freq: float = 50.0,
+    method: str = "fir",
+    order: int = 4,
+    iir_type: str = "butter"
 ) -> mne.io.RawArray:
-    """Apply FIR bandpass filter (in-place copy)."""
+    """Apply a custom filter (FIR or IIR) to the data."""
     raw_filtered = raw.copy()
-    raw_filtered.filter(l_freq, h_freq, method="fir", verbose=False)
+    
+    if method == "fir":
+        # For FIR, 'order' can be related to filter_length, 
+        # but MNE's default 'auto' is usually best. 
+        # We'll use order to influence filter_length if provided.
+        filter_length = f"{order}s" if order > 0 else "auto"
+        raw_filtered.filter(
+            l_freq, h_freq, 
+            method="fir", 
+            phase="zero", 
+            fir_window="hamming", 
+            fir_design="firwin",
+            verbose=False
+        )
+    else:
+        # IIR filters: butter, bessel, cheby1, etc.
+        iir_params = {
+            "order": order,
+            "ftype": iir_type,
+            "output": "sos"
+        }
+        # Chebyshev requires extra params, we'll use defaults for simplicity or add them if needed
+        if iir_type == "cheby1":
+            iir_params["rp"] = 0.5
+        
+        raw_filtered.filter(
+            l_freq, h_freq, 
+            method="iir", 
+            iir_params=iir_params, 
+            verbose=False
+        )
+        
     return raw_filtered
 
 
 def apply_notch(
     raw: mne.io.RawArray,
-    freqs: float | list[float] = 60.0,
+    freqs: float | list[float] = 60.0
 ) -> mne.io.RawArray:
-    """Apply notch filter at specified frequency/frequencies (in-place copy).
-    Uses IIR method for sharper attenuation and includes harmonics.
-    """
+    """Apply a sharp IIR notch filter at specified frequency/frequencies."""
     raw_filtered = raw.copy()
     if isinstance(freqs, (int, float)):
         freqs = [freqs]
     
-    # Generate harmonics up to Nyquist to ensure thorough filtering
-    sfreq = raw.info['sfreq']
-    nyquist = sfreq / 2.0
-    all_freqs = []
-    for f in freqs:
-        h = f
-        while h < nyquist:
-            all_freqs.append(h)
-            h += f
-    
-    if not all_freqs:
+    if not freqs:
         return raw_filtered
 
-    # IIR filters are generally more effective for notch filtering power line noise
     raw_filtered.notch_filter(
-        all_freqs, 
+        freqs, 
         method="iir", 
         verbose=False
     )
@@ -196,6 +251,236 @@ def extract_epoch_features(
     return pd.DataFrame(all_features)
 
 
+def extract_3d_features(
+    epochs: mne.Epochs,
+    bands: Optional[dict] = None,
+) -> tuple[np.ndarray, list[str]]:
+    """Extract 3D feature set: (epochs, channels, features).
+    
+    Features: Delta, Theta, Alpha, Beta, Gamma, RMS.
+    """
+    if bands is None:
+        bands = FREQ_BANDS
+
+    data = epochs.get_data()  # (n_epochs, n_channels, n_times)
+    sfreq = epochs.info["sfreq"]
+    n_epochs, n_channels, n_times = data.shape
+    
+    feature_names = list(bands.keys()) + ["RMS"]
+    n_features = len(feature_names)
+    
+    features_3d = np.zeros((n_epochs, n_channels, n_features))
+    
+    for ep_idx in range(n_epochs):
+        for ch_idx in range(n_channels):
+            # Scale signal to microvolts for standard EEG feature units
+            sig = data[ep_idx, ch_idx, :] * 1e6 
+            
+            # Band powers via Welch (converted to dB: 10*log10(P))
+            freqs, pxx = sp_signal.welch(sig, fs=sfreq, nperseg=min(len(sig), 256))
+            for f_idx, (band_name, (fmin, fmax)) in enumerate(bands.items()):
+                idx = np.logical_and(freqs >= fmin, freqs <= fmax)
+                if np.any(idx):
+                    p_mean = np.mean(pxx[idx])
+                    # Result in dB relative to 1 µV²/Hz
+                    features_3d[ep_idx, ch_idx, f_idx] = 10 * np.log10(p_mean + 1e-20)
+                else:
+                    features_3d[ep_idx, ch_idx, f_idx] = -200.0
+            
+            # RMS in microvolts
+            features_3d[ep_idx, ch_idx, -1] = np.sqrt(np.mean(sig**2))
+            
+    return features_3d, feature_names
+
+
+def get_epoch_tags(
+    epochs: mne.Epochs,
+    raw: mne.io.RawArray
+) -> list[str]:
+    """Identify the primary tag for each epoch based on Raw annotations.
+    
+    If an epoch overlaps with an annotation, it gets that label. 
+    If multiple, the one with the most overlap is chosen.
+    """
+    annotations = raw.annotations
+    if not annotations:
+        return ["none"] * len(epochs)
+
+    tags = []
+    # epoch onsets in seconds
+    onsets = epochs.events[:, 0] / raw.info['sfreq']
+    duration = epochs.tmax - epochs.tmin
+
+    for start_t in onsets:
+        end_t = start_t + duration
+        
+        # Find annotations that overlap [start_t, end_t]
+        epoch_label = "none"
+        max_overlap = 0
+        
+        for ann in annotations:
+            ann_start = ann['onset']
+            ann_end = ann_start + ann['duration']
+            
+            # Intersection
+            overlap_start = max(start_t, ann_start)
+            overlap_end = min(end_t, ann_end)
+            
+            if overlap_end > overlap_start:
+                overlap = overlap_end - overlap_start
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    epoch_label = ann['description']
+        
+        tags.append(epoch_label)
+    
+    return tags
+
+
+def apply_asr(
+    raw: mne.io.RawArray,
+    cutoff: float = 20.0,
+    window_len: float = 0.5
+) -> mne.io.RawArray:
+    """Artifact Subspace Reconstruction (ASR) inspired denoising.
+    Uses sliding window PCA to identify and project out high-variance components.
+    """
+    raw_copy = raw.copy()
+    data = raw_copy.get_data()
+    sfreq = raw.info['sfreq']
+    n_ch, n_samples = data.shape
+    
+    # 1. Standardize data (Z-score per channel)
+    mu = np.mean(data, axis=1, keepdims=True)
+    std = np.std(data, axis=1, keepdims=True)
+    data_norm = (data - mu) / (std + 1e-12)
+    
+    # 2. Window-based processing
+    win_samples = int(window_len * sfreq)
+    # Ensure window is large enough for PCA
+    win_samples = max(win_samples, n_ch * 2)
+    
+    # Step size (50% overlap)
+    step = win_samples // 2
+    
+    # Final data buffer
+    data_out = np.zeros_like(data_norm)
+    weights = np.zeros(n_samples)
+    
+    # Window function (Hanning) to smooth overlaps
+    hann = np.hanning(win_samples)
+    
+    # 3. Sliding window PCA
+    for start in range(0, n_samples - win_samples, step):
+        end = start + win_samples
+        window = data_norm[:, start:end]
+        
+        # PCA on this window
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=n_ch)
+        # We use components whose variance is significantly higher than 1.0 
+        # (since data is normalized, expected variance of PCA components is 1.0 
+        # if the data is white noise, but real EEG has structure).
+        # We look for components exceeding 'cutoff' times the median variance.
+        
+        pca.fit(window.T)
+        comp_vars = pca.explained_variance_
+        
+        # Identify "bad" components in this window
+        # In standardized data, component variances sum to n_ch.
+        # A component with variance >> 1 is likely an artifact.
+        bad_idx = comp_vars > cutoff
+        
+        if np.any(bad_idx):
+            components = pca.transform(window.T).T
+            components[bad_idx] = 0 # Suppress bad components
+            window_clean = pca.inverse_transform(components.T).T
+        else:
+            window_clean = window
+            
+        data_out[:, start:end] += window_clean * hann
+        weights[start:end] += hann
+        
+    # Handle regions not covered or at ends
+    weights[weights == 0] = 1.0
+    data_out /= weights
+    
+    # 4. Rescale and return
+    data_final = data_out * std + mu
+    raw_copy._data = data_final
+    return raw_copy
+
+def apply_wpt_denoising(
+    raw: mne.io.RawArray,
+    wavelet: str = "db4",
+    level: int = 4,
+    threshold: float = 0.02,
+) -> mne.io.RawArray:
+    """Denoise EEG signal using Wavelet Packet Transform (WPT)."""
+    raw_copy = raw.copy()
+    data = raw_copy.get_data()
+    
+    # We apply this channel by channel
+    for i in range(data.shape[0]):
+        sig = data[i]
+        # Decomposition
+        wp = pywt.WaveletPacket(data=sig, wavelet=wavelet, mode='symmetric', maxlevel=level)
+        
+        # Hard thresholding on nodes
+        # In a real scenario, we'd use more sophisticated thresholding (Universal, SURE, etc.)
+        # For this prototype, we'll zero out nodes where the energy is below the threshold
+        # of the total signal energy to keep it simple but functional.
+        total_energy = np.sum(sig**2)
+        for node in wp.get_level(level, 'freq'):
+            node_energy = np.sum(node.data**2)
+            if node_energy < threshold * total_energy:
+                node.data.fill(0)
+        
+        data[i] = wp.reconstruct(update=True)[:len(sig)]
+        
+    raw_copy._data = data
+    return raw_copy
+
+
+def apply_wat_denoising(
+    raw: mne.io.RawArray,
+    scale_level: int = 4,
+    threshold: float = 0.02,
+) -> mne.io.RawArray:
+    """Simplified 1D Wave Atom-like denoising using frequency partitioning."""
+    raw_copy = raw.copy()
+    data = raw_copy.get_data()
+    n_samples = data.shape[1]
+    
+    # Wave atoms often require power-of-2 length or specific padding
+    # For this implementation, we'll work on the FFT of the signal
+    for i in range(data.shape[0]):
+        sig = data[i]
+        f_hat = np.fft.fft(sig)
+        n = len(f_hat)
+        
+        # Partition frequency axis into tiles (atoms)
+        num_tiles = 2**scale_level
+        tile_size = n // num_tiles
+        
+        if tile_size == 0:
+            continue
+            
+        for j in range(num_tiles):
+            start = j * tile_size
+            end = (j + 1) * tile_size if j < num_tiles - 1 else n
+            
+            tile_coeffs = f_hat[start:end]
+            # Thresholding in frequency domain per "atom"
+            if np.mean(np.abs(tile_coeffs)) < threshold * np.mean(np.abs(f_hat)):
+                f_hat[start:end] = 0
+                
+        data[i] = np.real(np.fft.ifft(f_hat))
+        
+    raw_copy._data = data
+    return raw_copy
+
+
 # ---------------------------------------------------------------------------
 # EEG-specific anomaly helpers
 # ---------------------------------------------------------------------------
@@ -301,4 +586,3 @@ def compute_spectral_ratios(epochs: mne.Epochs) -> pd.DataFrame:
         alpha_beta[i] = mean_alpha / mean_beta if mean_beta > 1e-20 else 0.0
 
     return pd.DataFrame({"theta_beta": theta_beta, "alpha_beta": alpha_beta})
-

@@ -576,13 +576,18 @@ def _plot_detector_group(score_dict, colors, threshold_pct):
     if _video_events:
         strip = build_event_strip_trace(_video_events, y_position=0, time_offset_s=_video_offset)
         if strip:
-            # Use a secondary y-axis pinned to paper coordinates via an
-            # invisible subplot is complex; simpler to add as annotations.
-            # Instead, add coloured markers at the top of each subplot using
-            # the first subplot's y range.
+            # Stagger y-positions to avoid label/marker overlap
+            max_score = 0
+            for sc in score_dict.values():
+                if sc is not None and len(sc) > 0:
+                    max_score = max(max_score, np.max(sc))
+            
+            # Use 4 stagger levels to avoid overlap in dense event clusters
+            y_staggered = [max_score * (1.08 + (k % 4) * 0.08) for k in range(len(strip["x"]))]
+            
             fig.add_trace(go.Scattergl(
                 x=strip["x"],
-                y=[np.max(list(score_dict.values())[0]) * 1.15] * len(strip["x"]),
+                y=y_staggered,
                 mode="markers",
                 marker=strip["marker"],
                 text=strip["text"],
@@ -598,6 +603,7 @@ def _plot_detector_group(score_dict, colors, threshold_pct):
         margin=dict(l=60, r=20, t=top_margin, b=40),
     )
     fig.update_xaxes(title_text="Time (s)", row=n, col=1)
+    fig.update_yaxes(title_text="Score (dim.)", col=1)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -654,7 +660,7 @@ with tab_heatmap:
             x=[f"{t:.1f}s" for t in time_axis],
             y=rec.ch_names[:data.shape[1]],
             colorscale="YlOrRd",
-            colorbar=dict(title="|Z-score|"),
+            colorbar=dict(title="|Z-score| (dim.)"),
         ))
         fig_hm.update_layout(
             template="plotly_dark",
@@ -754,6 +760,7 @@ with tab_gallery:
                     template="plotly_dark",
                     height=max(250, n_ch_show * 45),
                     xaxis_title="Time (s)",
+                    yaxis_title="Amplitude (µV)",
                     yaxis=dict(
                         tickvals=offsets,
                         ticktext=ch_names[:n_ch_show],
@@ -881,7 +888,7 @@ if tab_trigger is not None:
         fig_tlar.update_layout(
             template="plotly_dark", height=420,
             xaxis_title="Time relative to trigger (s)",
-            yaxis_title="Anomaly score",
+            yaxis_title="Anomaly score (dim.)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             margin=dict(l=60, r=20, t=40, b=60),
         )
@@ -939,7 +946,7 @@ if tab_trigger is not None:
 
         fig_prepost.update_layout(
             template="plotly_dark", barmode="group", height=380,
-            yaxis_title="Mean anomaly score",
+            yaxis_title="Mean anomaly score (dim.)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             margin=dict(l=60, r=20, t=40, b=80),
         )
@@ -1126,7 +1133,7 @@ if tab_trigger is not None:
             fig_prox.update_layout(
                 template="plotly_dark", height=350,
                 xaxis_title="Time relative to trigger (s)",
-                yaxis_title="Count",
+                yaxis_title="Count (dim.)",
                 margin=dict(l=60, r=20, t=30, b=60),
             )
             st.plotly_chart(fig_prox, use_container_width=True)
@@ -1232,19 +1239,27 @@ if tab_video is not None:
         )
 
         # Bottom: Event strip
+        last_type_times = {}
         for ev in _video_events:
             color = EVENT_COLORS.get(ev.event_type, "#8b949e")
             icon_e = EVENT_ICONS.get(ev.event_type, "📌")
             sev_h = SEVERITY_SIZE.get(ev.severity, 8)
             eeg_ts = ev.timestamp_s + _video_offset  # align to EEG time
 
+            # Stagger logic: alternate text position if same-type events are within 3s
+            pos = "top center"
+            if ev.event_type in last_type_times:
+                if (eeg_ts - last_type_times[ev.event_type]) < 3.0:
+                    pos = "bottom center"
+            last_type_times[ev.event_type] = eeg_ts
+
             fig_timeline.add_trace(go.Scatter(
                 x=[eeg_ts], y=[ev.event_type],
                 mode="markers+text",
                 marker=dict(color=color, size=sev_h, symbol="diamond"),
                 text=[icon_e],
-                textposition="top center",
-                textfont=dict(size=10),
+                textposition=pos,
+                textfont=dict(size=11),
                 hovertext=f"{icon_e} {ev.description[:60]}<br>Severity: {ev.severity}<br>Video t={ev.timestamp_s:.1f}s  EEG t={eeg_ts:.1f}s",
                 hoverinfo="text",
                 showlegend=False,
@@ -1274,7 +1289,7 @@ if tab_video is not None:
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         fig_timeline.update_xaxes(title_text="Time (s)", row=2, col=1)
-        fig_timeline.update_yaxes(title_text="Score", row=1, col=1)
+        fig_timeline.update_yaxes(title_text="Score (dim.)", row=1, col=1)
         st.plotly_chart(fig_timeline, use_container_width=True)
 
     st.markdown("---")
@@ -1478,7 +1493,7 @@ if tab_video is not None:
 
             fig_pp.update_layout(
                 template="plotly_dark", barmode="group", height=350,
-                yaxis_title="Mean anomaly score",
+                yaxis_title="Mean anomaly score (dim.)",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 margin=dict(l=60, r=20, t=30, b=80),
             )
@@ -1552,7 +1567,7 @@ with tab_importance:
         fig_fi.update_layout(
             template="plotly_dark",
             height=max(400, top_n * 28),
-            xaxis_title="Feature Importance",
+            xaxis_title="Feature Importance (dim.)",
             margin=dict(l=200, r=20, t=20, b=40),
         )
         st.plotly_chart(fig_fi, use_container_width=True)

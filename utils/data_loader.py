@@ -36,7 +36,14 @@ class EEGRecording:
         """Build (or return cached) MNE RawArray from the EEG channels."""
         if self.raw is not None:
             return self.raw
-        eeg_data = self.data[self.ch_names].values.T  # (n_channels, n_samples)
+        
+        # Clean data: Fill NaNs/Infs to prevent pipeline crashes
+        clean_df = self.data[self.ch_names].copy()
+        if clean_df.isna().any().any() or np.isinf(clean_df.values).any():
+            # Replace inf with nan, interpolate missing values, and fill remaining with 0
+            clean_df = clean_df.replace([np.inf, -np.inf], np.nan).interpolate(method="linear").fillna(0.0)
+            
+        eeg_data = clean_df.values.T  # (n_channels, n_samples)
         # Convert from µV to V for MNE
         eeg_data = eeg_data * 1e-6
         info = mne.create_info(

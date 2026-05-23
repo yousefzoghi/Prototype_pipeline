@@ -21,6 +21,7 @@ NeuroEvac ingests raw EEG recordings (OpenBCI CSV/TXT, BrainFlow CSV) alongside 
 | **Anomaly Detection** | EEG-specific detectors (amplitude Z-score, spectral ratio, kurtosis/entropy) and general ML detectors (Isolation Forest, One-Class SVM, LOF, Autoencoder). Interactive heatmap, epoch gallery, feature importance, VR trigger analysis, and **video–EEG multi-modal correlation** |
 | **AI Insights** | UMAP + HDBSCAN unsupervised epoch clustering; AI-generated analysis reports via Template, Ollama, or OpenRouter |
 | **Survey Data** | Participant survey ingestion, psychometric scoring, radar and bar chart visualizations |
+| **Classification** | Train and evaluate machine learning models (SVM, Random Forest, XGBoost, etc.) on extracted EEG features |
 
 ### VR Screen Recording Analysis (New)
 
@@ -49,7 +50,8 @@ eeg_dashboard/
 │   ├── 4_Topography.py
 │   ├── 5_Anomaly_Detection.py # Anomaly detection + video–EEG analysis
 │   ├── 6_AI_Insights.py
-│   └── 7_Survey_Data.py
+│   ├── 7_Survey_Data.py
+│   └── 8_Classification.py
 ├── analysis/
 │   ├── ai_insights.py        # Clustering, LLM integration (Ollama / OpenRouter)
 │   ├── anomaly.py            # Anomaly detection algorithms
